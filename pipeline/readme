@@ -1,1 +1,233 @@
+# Business Data Digitization & Preprocessing Pipeline
 
+This notebook implements an end-to-end pipeline for digitizing handwritten business ledgers into structured CSV datasets, followed by feature engineering and data quality verification. It is part of the broader CSCI323 Sales Forecasting project and serves as the upstream data preparation stage that produces the `dat.csv` / `project_dataset_preprocessed.csv` files consumed by the modeling notebook.
+
+---
+
+## Overview
+
+The business operates physical handwritten registers to track daily warehouse inventory and customer sales. This notebook automates the conversion of scanned ledger images into machine-readable tabular data using the Gemini Vision API, then applies normalization, lag feature engineering, and mathematical verification to produce a clean, model-ready dataset.
+
+The pipeline covers two distinct stages:
+
+1. **Data Extraction** – Image-to-CSV conversion of handwritten ledger pages using Gemini 2.5 Flash.
+2. **Preprocessing** – Feature engineering, lag/rolling mean computation, and targeted repair of early-period NaN values.
+
+---
+
+## Repository Structure
+
+```text
+.
+├── notebook/
+│   └── Business_Data_Digitization_and_Preprocessing.ipynb
+├── data/
+│   ├── lhs_master.csv
+│   ├── rhs_master.csv
+│   ├── extraction_log_master.csv
+│   ├── project_dataset_preprocessed.csv
+│   └── project_dataset_lags_fixed_jan23_filled.csv
+└── README.md
+```
+
+> Adjust paths above to match your actual layout. All master CSV files are written to your configured `DRIVE_BASE_PATH` on Google Drive.
+
+---
+
+## 1. Ledger Layout
+
+The physical registers contain two page types, which the pipeline classifies automatically:
+
+- **LHS (Left-Hand Side)** – Grid-format warehouse inventory pages tracking daily stock balances per product. Columns: `item`, `open`, `in_qty`, `available`, `out_qty`, `balance`.
+- **RHS (Right-Hand Side)** – Continuous daily log pages tracking individual customer checkouts. Columns: `customer`, `item`, `qty`.
+
+Some LHS pages also contain overflow customer sales notes scribbled in the bottom margin. These are isolated via an `===OVERFLOW===` delimiter in the model response and processed as RHS rows.
+
+---
+
+## 2. Data Extraction Phase
+
+### Environment & API Setup (Cell 1)
+
+Requires the `google-genai` package and a Gemini API key stored in Colab Secrets under `GEMINI_API_KEY`. Google Drive is mounted to read source images and write output CSVs.
+
+```bash
+pip install -q google-genai
+```
+
+### Drive Configuration (Cell 2)
+
+Set the base path for your image folders and output master files:
+
+```python
+DRIVE_BASE_PATH = "/content/drive/MyDrive/data_images"
+```
+
+Image folders are expected to follow the naming convention `MM_YY` (e.g., `11_24` for November 2024). Files within each folder are sorted chronologically using a natural sort that handles bracketed duplicates (e.g., `page (2).jpg`).
+
+Rate limiting is built in to stay within API quotas:
+
+| Setting | Value |
+|---|---|
+| `PER_CALL_SLEEP` | 1.0 second between calls |
+| `BATCH` | 20 calls before a longer pause |
+| `BATCH_SLEEP` | 10.0 seconds pause |
+
+### Canonical Reference Data & Normalization (Cell 3)
+
+Two canonical word pools are defined:
+
+- **`CANONICAL_PRODUCTS`** – ~30 known product SKUs (e.g., `Starter`, `Finisher`, `Layer`, `Wheat`, `Barley`).
+- **`CANONICAL_CUSTOMERS`** – ~100+ known customer names.
+
+The normalization engine (`normalize_with_learning`) performs:
+1. Bracket and shorthand cleaning (e.g., strips `(OB)` old-balance markers, expands `(sud)` → `Sudani`).
+2. Exact case-insensitive match against the canonical pool.
+3. Fuzzy match via `difflib.get_close_matches` at a 0.75 cutoff.
+4. Falls back to the raw cleaned value if no match is found.
+
+### Unified Single-Pass Extraction Engine (Cell 4)
+
+Each image is sent to `gemini-2.5-flash` exactly once. The prompt instructs the model to:
+1. Classify the page as `LHS` or `RHS`.
+2. Extract the handwritten date header.
+3. Transcribe the data table in a strict CSV format with no preamble or markdown.
+
+The response format is:
+```
+SIDE:LHS
+DATE:2024-11-25
+item,open,in_qty,available,out_qty,balance
+Starter,120,50,170,80,90
+...
+```
+
+A `running_date_anchor` carries the last known valid date forward across pages where the date header is unclear or missing.
+
+### Master CSV Tracking & Idempotency (Cell 6)
+
+Three master output files are maintained:
+
+| File | Contents |
+|---|---|
+| `lhs_master.csv` | All inventory rows across all processed images |
+| `rhs_master.csv` | All customer sales rows across all processed images |
+| `extraction_log_master.csv` | Processing status per file (`OK` or error detail) |
+
+On each run, files already logged as `OK` are skipped, making the pipeline safe to resume after interruption without reprocessing completed images.
+
+### Dispatch Loop (Cell 7)
+
+Folders are processed in chronological order. A `MANUAL_START_FOLDER` setting allows resuming from a specific month without reprocessing earlier folders.
+
+For each image:
+- The API response is parsed to extract `SIDE` and `DATE` metadata from the first two lines.
+- The data body is parsed into a DataFrame, columns are normalized, numeric fields are coerced, and rows are appended to the appropriate master CSV.
+- LHS overflow sections are detected and routed to `rhs_master.csv`.
+- A session-level in-memory tracker (`session_completed_files`) prevents duplicate processing within the same Colab session even if the log file has not yet been flushed.
+
+---
+
+## 3. Preprocessing Phase
+
+The preprocessing stage takes the raw extracted CSVs and builds the full feature matrix used for modeling.
+
+### Feature Engineering
+
+Lag and rolling statistics are computed per item in chronological order:
+
+**Lag features** (days: 1, 7, 14, 30):
+- `out_lag_N` – units sold N days prior.
+- `balance_lag_N` – closing balance N days prior.
+
+**Rolling statistics** (windows: 7, 30 days):
+- `in_roll_mean_N`, `out_roll_mean_N`, `balance_roll_mean_N` – rolling means.
+- `in_roll_sd_N`, `out_roll_sd_N`, `balance_roll_sd_N` – rolling standard deviations.
+
+All lag and rolling calculations are grouped by `Item` to ensure that values do not bleed across different product SKUs.
+
+### January 2023 Lag Fix
+
+Early rows in the dataset (January 2023) had NaN lag and rolling values because the original pipeline applied a 29-day startup cutoff. A targeted repair function (`repair_lags_only_jan23_filled`) removes this restriction and backfills any NaN cell where a mathematically valid value can be computed from available prior rows, without altering any already-populated values.
+
+The repaired output is saved as:
+```
+project_dataset_lags_fixed_jan23_filled.csv
+```
+
+---
+
+## 4. Verification
+
+Two verification passes are run after the lag fix:
+
+### Column-Level Diff (Cell 43)
+
+Merges the pre-fix and post-fix datasets and checks every lag/rolling column for:
+- **Filled NaNs** – expected and logged as `✅`.
+- **Unexpected non-NaN changes** – flagged as `⚠️` (should be zero).
+
+Core ledger columns (`Open`, `IN`, `TOTAL`, `OUT`, `BALANCE`) are verified to be byte-for-byte identical between the two files.
+
+### Mathematical Re-verification (Cell 44–45)
+
+Re-computes all lag and rolling mean columns from scratch using the same logic and compares them against the saved file using `np.isclose` to account for floating-point precision. Any discrepancy is reported with example rows. A clean run prints:
+
+```
+🏆 All specified lag and rolling mean columns (with January 2023 fills) mathematically verified!
+```
+
+---
+
+## 5. Output Files
+
+| File | Description |
+|---|---|
+| `lhs_master.csv` | Raw daily inventory records per product |
+| `rhs_master.csv` | Raw daily customer sales records |
+| `extraction_log_master.csv` | Per-image processing audit log |
+| `project_dataset_preprocessed.csv` | Full feature matrix after merging and engineering |
+| `project_dataset_lags_fixed_jan23_filled.csv` | Final dataset with January 2023 lags backfilled |
+
+The final `project_dataset_lags_fixed_jan23_filled.csv` is the file referenced as `dat.csv` in the modeling notebook.
+
+---
+
+## 6. How to Run
+
+### Requirements
+
+- Python 3.10+
+- Google Colab (recommended — uses Drive mounting and Colab Secrets)
+- Gemini API key with access to `gemini-2.5-flash`
+
+```bash
+pip install google-genai pandas numpy
+```
+
+### Steps
+
+1. Upload your ledger images to Google Drive under `data_images/MM_YY/` folders.
+2. Add your Gemini API key to Colab Secrets as `GEMINI_API_KEY`.
+3. Set `DRIVE_BASE_PATH` in Cell 2 to match your Drive layout.
+4. Optionally set `MANUAL_START_FOLDER` in Cell 7 to resume from a specific month.
+5. Run all cells in order.
+
+To re-run only the preprocessing and verification stages (without re-calling the API), run Cells 3 and 40 onwards after the master CSVs are already populated.
+
+---
+
+## 7. Reproducibility Notes
+
+- The extraction loop is idempotent: re-running will skip any file already marked `OK` in the extraction log.
+- Normalization is deterministic given the fixed canonical pools and `difflib` cutoff.
+- Lag and rolling computations are fully deterministic — no random seed is required.
+- The `session_completed_files` in-memory set resets on Colab runtime restart; the persistent guard is the log CSV.
+
+---
+
+## 8. Acknowledgements
+
+- **Course:** CSCI323 – Modern Artificial Intelligence, UOWD.
+- **Instructors:** Dr. Milan Dordevic, Dr. Abdullah El Nokiti, Ms. Asma Damankesh, Ms. Syama Kurungodathil.
+- **Extraction model:** Google Gemini 2.5 Flash via the `google-genai` SDK.
