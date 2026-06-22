@@ -15,24 +15,7 @@ The pipeline covers two distinct stages:
 
 ---
 
-## Repository Structure
 
-```text
-.
-├── notebook/
-│   └── Business_Data_Digitization_and_Preprocessing.ipynb
-├── data/
-│   ├── lhs_master.csv
-│   ├── rhs_master.csv
-│   ├── extraction_log_master.csv
-│   ├── project_dataset_preprocessed.csv
-│   └── project_dataset_lags_fixed_jan23_filled.csv
-└── README.md
-```
-
-> Adjust paths above to match your actual layout. All master CSV files are written to your configured `DRIVE_BASE_PATH` on Google Drive.
-
----
 
 ## 1. Ledger Layout
 
@@ -181,15 +164,8 @@ Re-computes all lag and rolling mean columns from scratch using the same logic a
 
 ## 5. Output Files
 
-| File | Description |
-|---|---|
-| `lhs_master.csv` | Raw daily inventory records per product |
-| `rhs_master.csv` | Raw daily customer sales records |
-| `extraction_log_master.csv` | Per-image processing audit log |
-| `project_dataset_preprocessed.csv` | Full feature matrix after merging and engineering |
-| `project_dataset_lags_fixed_jan23_filled.csv` | Final dataset with January 2023 lags backfilled |
 
-The final `project_dataset_lags_fixed_jan23_filled.csv` is the file referenced as `dat.csv` in the modeling notebook.
+The final `project_dataset_lags_fixed_jan23_filled.csv` is the file referenced as `data.csv` in the modeling notebook.
 
 ---
 
