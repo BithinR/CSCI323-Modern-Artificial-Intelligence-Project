@@ -1,1 +1,21 @@
+Dataset: data.csv
+Dataset is available under the data folder.
+
+once uploaded, click run all.
+
+for Single-item forecast u can update PREDICT_ITEM and PREDICT_DATE.
+
+***notes to consider***
+The trained dataset ends at 20/07/2025 so the next day would be 21/07/2025.
+The model supports short term predcition in the range 7 days to max 30 days.
+THe model suffers in accuracy as the PREDICT_DATE increases since the model it dependet on rolling_mean 
+values tend to become a linear line with no variations.
+
+Sample items u can try:
+1. Starter,
+2. R.G,
+3. Branmix,
+4. Wheat,
+5. Barley.
+
 
